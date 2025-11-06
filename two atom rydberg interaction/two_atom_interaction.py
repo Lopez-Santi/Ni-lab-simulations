@@ -1,10 +1,10 @@
 '''
 two_atom_interaction.py
 Rydberg two-atom interaction simulation with QuTiP + ARC
-Simulates Na-Cs Rydberg interaction spectroscopy with thermal motion-induced broadening.
-Sequence: (1) π pulse prepares Cs in |r_Cs>, (2) scan Na detuning during Na π pulse.
+Simulates any two atom Rydberg interaction spectroscopy with thermal motion-induced broadening.
+Sequence: (1) π pulse prepares atom2 in |r_1>, (2) scan atom1 detuning during atom1 π pulse.
 
-Date: 30 October 2025
+Date: 06 November 2025
 Author: santi
 
 '''
@@ -22,7 +22,9 @@ from qutip import basis, qeye, sigmax, sigmaz, sigmam, tensor, mesolve, Qobj
 # from qutip.qip.circuit.interpolation import Cubic_Spline # piecewise time coefficients
 
 # ARC (install with: pip install ARC-Alkali-Rydberg-Calculator)
-from arc import Sodium, Cesium, PairStateInteractions  # species and interactions
+from arc import PairStateInteractions, AlkaliAtom  # species and interactions'
+# import all the atoms we might use
+from arc import Sodium, Cesium, Rubidium, Potassium
 
 from dataclasses import dataclass, field
 import numpy as np
@@ -39,59 +41,76 @@ class ExperimentConfig:
     """
     Configuration for the two-atom interaction experiment.
     """
-    # geometry: place Na at +x relative to Cs by R_mean_um
+    ### General atom information ###
+    # atom1 information
+    atom1: AlkaliAtom = field(default_factory=lambda: Sodium())
+    mass_atom1: float = Sodium().mass # mass of atom1 (kg)
+    n_atom1: int = 51 # Rydberg principal quantum number for atom1
+    l_atom1: int = 0 # Rydberg orbital quantum number for atom1
+    j_atom1: float = 0.5 # Rydberg total angular momentum for atom1
+    m1: int = 0.5 # magnetic quantum number for atom1
+    # Rabi frequency and coherence time
+    OMEGA_atom1_Hz: float = 5.0e5  # atom1 Rabi frequency (Hz)
+    T2_atom1_s: float = 5e-6 # coherence time for atom1
+    wavelength_nm_atom1: float = 616.0 # trapping wavelength for atom1 (nm)
+
+    # atom2 information
+    atom2: AlkaliAtom = field(default_factory=lambda: Cesium())
+    mass_atom2: float = Cesium().mass # mass of atom2 (kg)
+    n_atom2: int = 54 # Rydberg principal quantum number for atom2
+    l_atom2: int = 0 # Rydberg orbital quantum number for atom2
+    j_atom2: float = 0.5 # Rydberg total angular momentum for atom2
+    m2: int = 0.5 # magnetic quantum number for atom2
+    # Rabi frequency and coherence time
+    OMEGA_atom2_Hz: float = 0.0  # atom2 Rabi frequency (Hz)
+    T2_atom2_s: float = 20e-6 # coherence time for atom2
+    wavelength_nm_atom2: float = 1064.0 # trapping wavelength for atom2 (nm)
+    
+    ### Geometry and timing ###
+    # geometry: place atom1 at +x relative to atom2 by R_mean_um
     R_mean_um: float = 5.0 # mean interatomic distance (μm)
     R_axis_um: Tuple[float, float, float] = field(default_factory=lambda: (1.0, 0.0, 0.0))  # unit vector
 
-    OMEGA_Na_Hz: float = 5.0e5  # Na Rabi frequency (Hz)
-    OMEGA_Cs_Hz: float = 0.0  # Cs Rabi frequency (Hz)
+    # relevant timing settings
+    t_wait_s: float = 0.0 # wait time between pulses (not tested)
+    T1_use_ARC: bool = True # whether to use ARC lifetimes for T1
+
+    ### Trap parameters for both atoms ###
+    # Order: (x, y, z). (radial, radial, axial)
+    # These are the *ground-state* trap temps of each tweezer. (uK)
+    T_uK_atom1: Tuple[float, float, float] = (2.0, 2.0, 2.0)
+    T_uK_atom2: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    # These are the *ground-state* trap frequencies of each tweezer. (loading depth)
+    omega_trap_atom1_Hz: Tuple[float, float, float] = (300e3 * 0.02, 300e3 * 0.02, 50e3 * 0.02)  # multipled by drop factor of 2%
+    omega_trap_atom2_Hz: Tuple[float, float, float] = (100e3 * 0.02, 100e3 * 0.02, 20e3 * 0.02)  # multipled by drop factor of 2%
+    # depth of the trap when loaded (uK)
+    load_depth_T_atom1: float = 300 # uK
+    load_depth_T_atom2: float = 100 # uK
+
+    load_factor: float = np.sqrt(0.01)  # % of trap depth after dropping
+
+    ### simulation information ###
     # use default_factory for arrays
     Delta_scan_Hz: np.ndarray = field(
         default_factory=lambda: np.linspace(-10e6, 10e6, 161)
     )
 
-    t_wait_s: float = 0.0 # wait time between pulses
-    
-    # Order: (x, y, z). (radial, radial, axial)
-    # These are the *ground-state* trap temps of each tweezer. (uK)
-    T_uK_Na: Tuple[float, float, float] = (2.0, 2.0, 2.0)
-    T_uK_Cs: Tuple[float, float, float] = (1.0, 1.0, 1.0)
-    # These are the *ground-state* trap frequencies of each tweezer. (loading depth)
-    omega_trap_Na_Hz: Tuple[float, float, float] = (300e3 * 0.02, 300e3 * 0.02, 50e3 * 0.02)  # multipled by drop factor of 2%
-    omega_trap_Cs_Hz: Tuple[float, float, float] = (100e3 * 0.02, 100e3 * 0.02, 20e3 * 0.02)  # multipled by drop factor of 2%
-
-    T2_Na_s: float = 5e-6 # coherence time for Na
-    T2_Cs_s: float = 20e-6 # coherence time for Cs
-    T1_use_ARC: bool = True # whether to use ARC lifetimes for T1
-
     broadening: bool = True  # turn on or off broadening
+    simulate_atom1_recapture: bool = False  # whether to simulate atom1 recapture
+    simulate_atom2_recapture: bool = False  # whether to simulate atom2 recapture
 
     N_mc: int = 200  # number of Monte Carlo samples per detuning
     N_steps: int = 20  # number of time steps in evolution
-    seed: Optional[int] = 1234
-
-    n_Na: int = 51 # Rydberg principal quantum number for Na
-    n_Cs: int = 54 # Rydberg principal quantum number for Cs
-    l_Na: int = 0 # Rydberg orbital quantum number for Na
-    l_Cs: int = 0 # Rydberg orbital quantum number for Cs
-    j_Na: float = 0.5 # Rydberg total angular momentum for Na
-    j_Cs: float = 0.5 # Rydberg total angular momentum for Cs
-
-    load_depth_T_Na: float = 300 # uK
-    load_depth_T_Cs: float = 100 # uK
-
-    load_factor: float = np.sqrt(0.01)  # % of trap depth after dropping
+    seed: Optional[int] = None#1234
     
     plot_displacements: bool = False # whether to plot displacement histograms after simulation
-    displacement_list: list = field(default_factory=list) # to store displacements for plotting
-
-    mass_Na: float = Sodium().mass # mass of Na atom (kg)
-    mass_Cs: float = Cesium().mass # mass of Cs atom (kg)
+    positions_list: list = field(default_factory=list) # to store positions for plotting
+    velocities_list: list = field(default_factory=list) # to store velocities for plotting
 
 # ----------------------------
 # C6 calculation with ARC - using perturbation theory
 # ----------------------------
-def compute_c6_na_cs_rad_per_s_um6(cfg: ExperimentConfig,
+def compute_c6_atom1_atom2_rad_per_s_um6(cfg: ExperimentConfig,
                                    theta: float = 0.0, phi: float = 0.0,
                                    nRange: int = 5, lRange: int = 5,
                                    deltaMax_Hz: float = 25e9,
@@ -99,14 +118,14 @@ def compute_c6_na_cs_rad_per_s_um6(cfg: ExperimentConfig,
                                    n_eigs: int = 250,
                                    progress: bool = False) -> float:
     """
-    Use ARC's PairStateInteractions to find C6 for Na(51S1/2)-Cs(54S1/2).
+    Use ARC's PairStateInteractions to find C6 for atom1 + atom2.
     Returns C6 in angular units: [rad/s * μm^6] (so V(t) = C6 / R(t)^6).
     """
     # Build inter-species pair-state calculation
     calc = PairStateInteractions(
-        Sodium(), cfg.n_Na, cfg.l_Na, cfg.j_Na,
-        cfg.n_Cs, cfg.l_Cs, cfg.j_Cs,
-        m1=0.5, m2=0.5, atom2=Cesium()
+        cfg.atom1, cfg.n_atom1, cfg.l_atom1, cfg.j_atom1,
+        cfg.n_atom2, cfg.l_atom2, cfg.j_atom2,
+        m1=cfg.m1, m2=cfg.m2, atom2=cfg.atom2
     )
     # calculate C6 using getC6perturbatively
     c6_freq_um6 = calc.getC6perturbatively(theta=theta, phi=phi, nRange=nRange, energyDelta=deltaMax_Hz)
@@ -121,101 +140,103 @@ def compute_c6_na_cs_rad_per_s_um6(cfg: ExperimentConfig,
 
 # State lifetimes from ARC
 # ----------------------------
-def get_state_lifetimes_from_arc(
-    temperature_Na_K: float = 300.0,
-    temperature_Cs_K: float = 300.0,
-    n_l_j_Na=(51,0,0.5),
-    n_l_j_Cs=(54,0,0.5),
+def get_state_lifetimes_from_arc(cfg: ExperimentConfig,
+    # temperature_atom1_K: float = 300.0,
+    # temperature_atom2_K: float = 300.0,
+    # n_l_j_atom1=(51,0,0.5),
+    # n_l_j_atom2=(54,0,0.5),
     n_upper_offset: int = 25,
 ):
     """
-    Get T1 lifetimes for Na and Cs Rydberg states from ARC.
+    Get T1 lifetimes for atom1 and atom2 Rydberg states from ARC.
     Parameters:
-        temperature_Na_K: temperature for Na (K)
-        temperature_Cs_K: temperature for Cs (K)
-        n_l_j_Na: tuple of (n, l, j) for Na Rydberg state
-        n_l_j_Cs: tuple of (n, l, j) for Cs Rydberg state
-        n_upper_offset: include levels up to n + n_upper_offset for blackbody
-    Returns: (T1_Na [s], T1_Cs [s])
+        # temperature_atom1_K: temperature for atom1 (K)
+        # temperature_atom2_K: temperature for atom2 (K)
+        # n_l_j_atom1: tuple of (n, l, j) for atom1 Rydberg state
+        # n_l_j_atom2: tuple of (n, l, j) for atom2 Rydberg state
+        n_upper_offset: include levels up to n + n_upper_offset for blackbody (hardcoded to 0)
+    Returns: (T1_atom1 [s], T1_atom2 [s])
     """
-    Na = Sodium()
-    Cs = Cesium()
-    nNa = n_l_j_Na[0]
-    nCs = n_l_j_Cs[0]
+    atom1 = cfg.atom1
+    atom2 = cfg.atom2
+    n_l_j_atom1 = (cfg.n_atom1, cfg.l_atom1, cfg.j_atom1)
+    n_l_j_atom2 = (cfg.n_atom2, cfg.l_atom2, cfg.j_atom2)
+    n_atom1 = cfg.n_atom1
+    n_atom2 = cfg.n_atom2
 
-    T1_Na = Na.getStateLifetime(
-        *n_l_j_Na,
-        temperature=temperature_Na_K,
-        includeLevelsUpTo=nNa + n_upper_offset
+    T1_atom1 = atom1.getStateLifetime(
+        *n_l_j_atom1,
+        temperature= np.mean(cfg.T_uK_atom1) * 1e-6, # convert μK to K
+        includeLevelsUpTo=n_atom1 + n_upper_offset
     )
-    T1_Cs = Cs.getStateLifetime(
-        *n_l_j_Cs,
-        temperature=temperature_Cs_K,
-        includeLevelsUpTo=nCs + n_upper_offset
+    T1_atom2 = atom2.getStateLifetime(
+        *n_l_j_atom2,
+        temperature= np.mean(cfg.T_uK_atom2) * 1e-6, # convert μK to K
+        includeLevelsUpTo=n_atom2 + n_upper_offset
     )
-    return float(T1_Na), float(T1_Cs)
+    return float(T1_atom1), float(T1_atom2)
 
 # Hamiltonian construction
 # ----------------------------
 def two_atom_ops():
     """
-    Projectors and Pauli ops on a 2x2 two-level Hilbert space (Na * Cs).
-    Returns: (n_Na, n_Cs, n_Na_n_Cs, sx_Na, sx_Cs, sz_Na, sz_Cs, sm_Na, sm_Cs)
+    Projectors and Pauli ops on a 2x2 two-level Hilbert space (atom1 * atom2).
+    Returns: (n_atom1, n_atom2, n_atom1_n_atom2, sx_atom1, sx_atom2, sz_atom1, sz_atom2, sm_atom1, sm_atom2)
     """
     g = basis(2, 0); r = basis(2, 1)
     n_single = r * r.dag()
     I = qeye(2)
     # Number operators
-    n_Na = tensor(n_single, I)
-    n_Cs = tensor(I, n_single)
-    n_Na_n_Cs = tensor(n_single, n_single)
+    n_atom1 = tensor(n_single, I)
+    n_atom2 = tensor(I, n_single)
+    n_atom1_n_atom2 = tensor(n_single, n_single)
     # Drives (σ_x)
     sx = sigmax()
-    sx_Na = tensor(sx, I)
-    sx_Cs = tensor(I, sx)
+    sx_atom1 = tensor(sx, I)
+    sx_atom2 = tensor(I, sx)
     # σz (for dephasing)
     sz = sigmaz()
-    sz_Na = tensor(sz, I)
-    sz_Cs = tensor(I, sz)
+    sz_atom1 = tensor(sz, I)
+    sz_atom2 = tensor(I, sz)
     # Lowering
     sm = sigmam()
-    sm_Na = tensor(sm, I)
-    sm_Cs = tensor(I, sm)
-    return n_Na, n_Cs, n_Na_n_Cs, sx_Na, sx_Cs, sz_Na, sz_Cs, sm_Na, sm_Cs
+    sm_atom1 = tensor(sm, I)
+    sm_atom2 = tensor(I, sm)
+    return n_atom1, n_atom2, n_atom1_n_atom2, sx_atom1, sx_atom2, sz_atom1, sz_atom2, sm_atom1, sm_atom2
 
-def build_time_dependent_H(OMEGA_Na_rad: float,
-                           OMEGA_Cs_rad: float,
-                           Delta_Na_rad: float,
+def build_time_dependent_H(OMEGA_atom1_rad: float,
+                           OMEGA_atom2_rad: float,
+                           Delta_atom1_rad: float,
                            V_of_t: Callable[[np.ndarray], np.ndarray],
                            tlist: np.ndarray) -> list:
     """
     QuTiP list-style Hamiltonian with time-dependent interaction V(t).
-    H = (Ω_Na/2) sigma_x_Na + (Ω_Cs/2) sigma_x_Cs - Δ_Na n_Na + V(t) n_Na n_Cs
+    H = (Ω_atom1/2) sigma_x_atom1 + (Ω_atom2/2) sigma_x_atom2 - Δ_atom1 n_atom1 + V(t) n_atom1 n_atom2
     Parameters:
-        OMEGA_Na_rad: Na Rabi frequency (rad/s)
-        OMEGA_Cs_rad: Cs Rabi frequency (rad/s)
-        Delta_Na_rad: Na detuning (rad/s)
+        OMEGA_atom1_rad: atom1 Rabi frequency (rad/s)
+        OMEGA_atom2_rad: atom2 Rabi frequency (rad/s)
+        Delta_atom1_rad: atom1 detuning (rad/s)
         V_of_t: function that takes np.ndarray times and returns V(t) array
         tlist: np.ndarray of times (s)
     Returns: list-style Hamiltonian for QuTiP
     """
-    n_Na, _, n_Na_n_Cs, sx_Na, sx_Cs, *_ = two_atom_ops()
+    n_atom1, n_atom2, n_atom1_n_atom2, sx_atom1, sx_atom2, *_ = two_atom_ops()
 
     H = []
     # Constant drive terms (coefficients are constants -> provide numeric prefactors)
-    if OMEGA_Na_rad != 0.0:
-        H.append([sx_Na, lambda t, args: 0.5 * OMEGA_Na_rad])
-    if OMEGA_Cs_rad != 0.0:
-        H.append([sx_Cs, lambda t, args: 0.5 * OMEGA_Cs_rad]) # no Cs drive here
+    if OMEGA_atom1_rad != 0.0:
+        H.append([sx_atom1, lambda t, args: 0.5 * OMEGA_atom1_rad])
+    if OMEGA_atom2_rad != 0.0:
+        H.append([sx_atom2, lambda t, args: 0.5 * OMEGA_atom2_rad]) # no atom2 drive here
 
-    # Static Na detuning term: -Δ_Na * n_Na
-    if Delta_Na_rad != 0.0:
-        H.append([n_Na, lambda t, args: -Delta_Na_rad])
+    # Static atom1 detuning term: -Δ_atom1 * n_atom1
+    if Delta_atom1_rad != 0.0:
+        H.append([n_atom1, lambda t, args: -Delta_atom1_rad])
 
-    # Time-dependent interaction: +V(t) * n_Na n_Cs
+    # Time-dependent interaction: +V(t) * n_atom1 n_atom2
     V_vals = V_of_t(tlist)
     # QuTiP will linearly interpolate time-dependent arrays
-    H.append([n_Na_n_Cs, V_vals])
+    H.append([n_atom1_n_atom2, V_vals])
 
     return H
 
@@ -228,6 +249,7 @@ def is_atom_recaptured(x0: Tuple[float, float, float],
                        Temps_uK_xyz: Tuple[float, float, float],
                        load_depth_T_uK: float,
                        tlist: np.ndarray,
+                       wavelength_nm: float,
                        rng) -> bool:
     """
     Check if the atom is recaptured after time tlist[-1].
@@ -255,12 +277,11 @@ def is_atom_recaptured(x0: Tuple[float, float, float],
     # Ur = 0.5 * m_kg * np.sum((np.array(omegas_Hz_xyz) * TWOPI)**2 * np.array(r_vec)**2) # in J
 
     # calculate potential energy using gaussian beam
-    
-    # calculate beam waist from trap temp and radial trap freq
-    w0 = np.sqrt( (2 * kB * load_depth_T_uK * 1e-6) / (m_kg * (TWOPI * omegas_Hz_xyz[0])**2) )
-    
+    # calculate beam waist from radial and axial trap frequencies
+    w0 = (omegas_Hz_xyz[0] / omegas_Hz_xyz[2]) * wavelength_nm*1e-9 / (np.pi * np.sqrt(2))
+
     # calculate the beam waist at position z
-    w_z = w0 * np.sqrt(1 + (r_vec[2] / (np.pi * w0**2 / (616e-9)))**2 )
+    w_z = w0 * np.sqrt(1 + (r_vec[2] / (np.pi * w0**2 / (wavelength_nm*1e-9)))**2 )
 
     # calculate potential energy
     Ur = kB * load_depth_T_uK * 1e-6 * (1 - (w0**2 / w_z**2) * np.exp(-2 * (r_vec[0]**2 + r_vec[1]**2) / w_z**2)) # in J
@@ -328,17 +349,18 @@ def sample_QHO_initial_3d(m_kg: float,
     return x0, v0
 
 # # Lists to store initial conditions and displacements (for analysis/debugging)
-# x_Cs_list = []
-# x_Na_list = []
-# v_Cs_list = []
-# v_Na_list = []
+# x_atom2_list = []
+# x_atom1_list = []
+# v_atom2_list = []
+# v_atom1_list = []
 # displacement_list = []
 
 def make_V_of_t_generator(c6_rad_um6: float,
                           cfg: ExperimentConfig,
                           tlist: np.ndarray,
                           rng: np.random.Generator,
-                          displacement_list: list) -> callable:
+                          positions_list: list,
+                          velocities_list: list) -> callable:
     """
     Build V(t) = C6 / |R(t)|^6 using QHO thermal initial conditions
     for *each species and axis* (using Lee Liu thesis section C.2).
@@ -349,7 +371,7 @@ def make_V_of_t_generator(c6_rad_um6: float,
         rng: np.random.Generator
     Returns:
         V_of_t: function that takes np.ndarray times and returns V(t) array
-        recaptured: bool, whether Na atom is recaptured at end of tlist
+        recaptured: bool, whether atom1 atom is recaptured at end of tlist
     """
 
     # Mean axis separation vector in μm
@@ -369,34 +391,35 @@ def make_V_of_t_generator(c6_rad_um6: float,
         return V_of_t, True # broadening off, always recaptured
     
     # Sample initial (x0, v0) for each atom from QHO distribution
-    m_Na = cfg.mass_Na
-    m_Cs = cfg.mass_Cs
+    m_atom1 = cfg.mass_atom1
+    m_atom2 = cfg.mass_atom2
 
-    x0_Na_um, v0_Na_umps = sample_QHO_initial_3d(
-        m_Na, np.array(cfg.omega_trap_Na_Hz) * cfg.load_factor, cfg.T_uK_Na, rng
+    x0_atom1_um, v0_atom1_umps = sample_QHO_initial_3d(
+        m_atom1, np.array(cfg.omega_trap_atom1_Hz) * cfg.load_factor, cfg.T_uK_atom1, rng
     )
 
-    x0_Cs_um, v0_Cs_umps = sample_QHO_initial_3d(
-        m_Cs, np.array(cfg.omega_trap_Cs_Hz) * cfg.load_factor, cfg.T_uK_Cs, rng
+    x0_atom2_um, v0_atom2_umps = sample_QHO_initial_3d(
+        m_atom2, np.array(cfg.omega_trap_atom2_Hz) * cfg.load_factor, cfg.T_uK_atom2, rng
     )
 
     # for debugging / analysis, store sampled values
-    # x_Na_list.append(x0_Na_um)
-    # v_Na_list.append(v0_Na_umps)
-    # x_Cs_list.append(x0_Cs_um)
-    # v_Cs_list.append(v0_Cs_umps)
+    # x_atom1_list.append(x0_atom1_um)
+    # v_atom1_list.append(v0_atom1_umps)
+    # x_atom2_list.append(x0_atom2_um)
+    # v_atom2_list.append(v0_atom2_umps)
 
     # Relative position over time (μm)
-    # R(t) = R0 + (x0_Na - x0_Cs) + (vNa - vCs)*t
-    dx = (x0_Na_um - x0_Cs_um)
-    dv = (v0_Na_umps - v0_Cs_umps)
+    # R(t) = R0 + (x0_atom1 - x0_atom2) + (v_atom1 - v_atom2)*t
+    dx = (x0_atom1_um - x0_atom2_um)
+    dv = (v0_atom1_umps - v0_atom2_umps)
     R_vec_t = R0_vec_um + dx + dv * tlist[:, None]
     # print(f"Initial relative position dx: {dx} μm")
     R_norm_t = np.linalg.norm(R_vec_t, axis=1)
-    displacement_list.append(R_norm_t[-1])
-
-    # avg_x_um = (np.linalg.norm(x0_Na_um - x0_Cs_um))
-    # avg_v_umps = (np.linalg.norm(v0_Na_umps - v0_Cs_umps))
+    positions_list.append(dx)
+    velocities_list.append(dv)
+    
+    # avg_x_um = (np.linalg.norm(x0_atom1_um - x0_atom2_um))
+    # avg_v_umps = (np.linalg.norm(v0_atom1_umps - v0_atom2_umps))
     # print(f"Sampled avg initial separation: {avg_x_um:.2f} μm")
     # print(f"Sampled avg relative velocity: {avg_v_umps:.2f} μm/s")
     V_t = c6_rad_um6 / (R_norm_t ** 6)
@@ -404,48 +427,67 @@ def make_V_of_t_generator(c6_rad_um6: float,
     def V_of_t(_times: np.ndarray) -> np.ndarray:
         # QuTiP will pass the same tlist; return precomputed array
         return V_t
-    
-    # check if Na atom is recaptured (we are dominated by Na loss)
-    m_Na = cfg.mass_Na
-    recaptured = is_atom_recaptured(x0_Na_um, v0_Na_umps,
-        m_kg=m_Na,
-        omegas_Hz_xyz=cfg.omega_trap_Na_Hz,
-        Temps_uK_xyz=cfg.T_uK_Na,
-        load_depth_T_uK=cfg.load_depth_T_Na,
-        tlist=tlist,
-        rng=rng
-    ) # True if recaptured, False if lost
-    
+
+    if cfg.simulate_atom1_recapture:
+        # check if atom1 is recaptured (we are dominated by atom1 loss)
+        recaptured1 = is_atom_recaptured(x0_atom1_um, v0_atom1_umps,
+            m_kg=m_atom1,
+            omegas_Hz_xyz=cfg.omega_trap_atom1_Hz,
+            Temps_uK_xyz=cfg.T_uK_atom1,
+            load_depth_T_uK=cfg.load_depth_T_atom1,
+            tlist=tlist,
+            wavelength_nm=cfg.wavelength_nm_atom1,
+            rng=rng
+        ) # True if recaptured, False if lost
+        recaptured = recaptured1
+    if cfg.simulate_atom2_recapture:
+        # check if atom2 is recaptured (we are dominated by atom2 loss)
+        recaptured2 = is_atom_recaptured(x0_atom2_um, v0_atom2_umps,
+            m_kg=m_atom2,
+            omegas_Hz_xyz=cfg.omega_trap_atom2_Hz,
+            Temps_uK_xyz=cfg.T_uK_atom2,
+            load_depth_T_uK=cfg.load_depth_T_atom2,
+            tlist=tlist,
+            wavelength_nm=cfg.wavelength_nm_atom2,
+            rng=rng
+        ) # True if recaptured, False if lost
+        recaptured = recaptured2
+    if not cfg.simulate_atom1_recapture and not cfg.simulate_atom2_recapture: # neither atom recapture simulated
+        recaptured = True
+    if cfg.simulate_atom1_recapture and cfg.simulate_atom2_recapture:
+        recaptured = recaptured1 and recaptured2
+
     # print(V_t)
     return V_of_t, recaptured
 
 # Single-shot simulation
 # ----------------------------
-def simulate_shot(Delta_Na_Hz,
+def simulate_shot(Delta_atom1_Hz,
                   cfg,
                   c6_rad_um6,
                   rng,
                   T1_cache=None,
                   interaction_on=True,
-                  displacement_list=[]):
+                  positions_list=[],
+                  velocities_list=[]):
     """
-    Simulate one 'shot' of the Na π-pulse.
+    Simulate one 'shot' of the atom1 π-pulse.
     If interaction_on=False, the V(R) term is set to zero.
     Parameters:
-        Delta_Na_Hz: Na detuning for this shot (Hz)
+        Delta_atom1_Hz: atom1 detuning for this shot (Hz)
         cfg: ExperimentConfig
         c6_rad_um6: precomputed C6 coefficient
         rng: np.random.Generator
-        T1_cache: optional tuple of (T1_Na, T1_Cs) to avoid recomputing lifetimes
+        T1_cache: optional tuple of (T1_atom1, T1_atom2) to avoid recomputing lifetimes
         interaction_on: whether to include interaction term in Hamiltonian
     Returns: P_excitation (float)
     """
-    OMEGA_Na_rad = 2 * np.pi * cfg.OMEGA_Na_Hz
-    OMEGA_Cs_rad = 2 * np.pi * cfg.OMEGA_Cs_Hz
-    Delta_Na_rad = 2 * np.pi * Delta_Na_Hz
+    OMEGA_atom1_rad = 2 * np.pi * cfg.OMEGA_atom1_Hz
+    OMEGA_atom2_rad = 2 * np.pi * cfg.OMEGA_atom2_Hz
+    Delta_atom1_rad = 2 * np.pi * Delta_atom1_Hz
 
     # π-pulse time and time list
-    t_pi = np.pi / max(OMEGA_Na_rad, 1e-30) # avoid div by zero [sec]
+    t_pi = np.pi / max(OMEGA_atom1_rad, 1e-30) # avoid div by zero [sec]
     tlist = np.linspace(0.0, t_pi, cfg.N_steps) # 200 time steps
 
     # Prepare interaction function
@@ -455,7 +497,8 @@ def simulate_shot(Delta_Na_Hz,
             cfg=cfg,
             tlist=tlist,
             rng=rng,
-            displacement_list=displacement_list
+            positions_list=positions_list,
+            velocities_list=velocities_list
         )
         if not recaptured:
             # Atom lost; return 0 excitation probability immediately
@@ -468,39 +511,39 @@ def simulate_shot(Delta_Na_Hz,
 
     # Build Hamiltonian
     H = build_time_dependent_H(
-        OMEGA_Na_rad=OMEGA_Na_rad,
-        OMEGA_Cs_rad=OMEGA_Cs_rad,
-        Delta_Na_rad=Delta_Na_rad,
+        OMEGA_atom1_rad=OMEGA_atom1_rad,
+        OMEGA_atom2_rad=OMEGA_atom2_rad,
+        Delta_atom1_rad=Delta_atom1_rad,
         V_of_t=V_of_t,
         tlist=tlist,
     )
 
-    # Initial state |g_Na, r_Cs>
+    # Initial state |g_atom1, r_atom2>
     g = basis(2, 0)
     r = basis(2, 1)
     psi0 = tensor(g, r)
 
     # Collapses (use cached lifetimes)
     if T1_cache is not None:
-        T1_Na, T1_Cs = T1_cache
+        T1_atom1, T1_atom2 = T1_cache
     else:
-        T1_Na, T1_Cs = 50e-6, 80e-6
+        T1_atom1, T1_atom2 = 50e-6, 80e-6
 
-    n_Na, n_Cs, _, _, _, sz_Na, sz_Cs, sm_Na, sm_Cs = two_atom_ops()
+    n_atom1, n_atom2, _, _, _, sz_atom1, sz_atom2, sm_atom1, sm_atom2 = two_atom_ops()
     c_ops = []
-    if T1_Na > 0:
-        c_ops.append(np.sqrt(1.0 / T1_Na) * sm_Na)
-    if T1_Cs > 0:
-        c_ops.append(np.sqrt(1.0 / T1_Cs) * sm_Cs)
+    if T1_atom1 > 0:
+        c_ops.append(np.sqrt(1.0 / T1_atom1) * sm_atom1)
+    if T1_atom2 > 0:
+        c_ops.append(np.sqrt(1.0 / T1_atom2) * sm_atom2)
     # Dephasing rates
-    gamma_phi_Na = max(0.0, (1.0 / cfg.T2_Na_s) - 0.5 * (0.0 if T1_Na == 0 else 1.0 / T1_Na))
-    gamma_phi_Cs = max(0.0, (1.0 / cfg.T2_Cs_s) - 0.5 * (0.0 if T1_Cs == 0 else 1.0 / T1_Cs))
-    if gamma_phi_Na > 0:
-        c_ops.append(np.sqrt(0.5 * gamma_phi_Na) * sz_Na)
-    if gamma_phi_Cs > 0:
-        c_ops.append(np.sqrt(0.5 * gamma_phi_Cs) * sz_Cs)
+    gamma_phi_atom1 = max(0.0, (1.0 / cfg.T2_atom1_s) - 0.5 * (0.0 if T1_atom1 == 0 else 1.0 / T1_atom1))
+    gamma_phi_atom2 = max(0.0, (1.0 / cfg.T2_atom2_s) - 0.5 * (0.0 if T1_atom2 == 0 else 1.0 / T1_atom2))
+    if gamma_phi_atom1 > 0:
+        c_ops.append(np.sqrt(0.5 * gamma_phi_atom1) * sz_atom1)
+    if gamma_phi_atom2 > 0:
+        c_ops.append(np.sqrt(0.5 * gamma_phi_atom2) * sz_atom2)
 
-    result = mesolve(H, psi0, tlist, c_ops=c_ops, e_ops=[n_Na])
+    result = mesolve(H, psi0, tlist, c_ops=c_ops, e_ops=[n_atom1])
     
     return 1-float(np.real(result.expect[0][-1]))
 
@@ -508,7 +551,7 @@ def simulate_shot(Delta_Na_Hz,
 # ----------------------------
 def scan_detuning(cfg, c6_rad_um6=None, interaction_on=True):
     """
-    Scan over Na detunings with Monte Carlo sampling.
+    Scan over atom1 detunings with Monte Carlo sampling.
     Parameters:
         cfg: ExperimentConfig
         c6_rad_um6: optional precomputed C6 coefficient
@@ -517,22 +560,24 @@ def scan_detuning(cfg, c6_rad_um6=None, interaction_on=True):
     """
     rng = np.random.default_rng(cfg.seed)
     if c6_rad_um6 is None:
-        c6_rad_um6 = compute_c6_na_cs_rad_per_s_um6(cfg)
+        c6_rad_um6 = compute_c6_atom1_atom2_rad_per_s_um6(cfg)
 
     if cfg.T1_use_ARC:
-        T1_Na, T1_Cs = get_state_lifetimes_from_arc(
-            temperature_Na_K=np.mean(cfg.T_uK_Na) * 1e-6,
-            temperature_Cs_K=np.mean(cfg.T_uK_Cs) * 1e-6,
-            n_l_j_Na=(cfg.n_Na, cfg.l_Na, cfg.j_Na),
-            n_l_j_Cs=(cfg.n_Cs, cfg.l_Cs, cfg.j_Cs),
+        T1_atom1, T1_atom2 = get_state_lifetimes_from_arc(
+            cfg,
+            # temperature_atom1_K=np.mean(cfg.T_uK_atom1) * 1e-6,
+            # temperature_atom2_K=np.mean(cfg.T_uK_atom2) * 1e-6,
+            # n_l_j_atom1=(cfg.n_atom1, cfg.l_atom1, cfg.j_atom1),
+            # n_l_j_atom2=(cfg.n_atom2, cfg.l_atom2, cfg.j_atom2),
             n_upper_offset=0, # arbitrary cutoff for levels included in ARC lifetime calc
         )
 
     else:
-        T1_Na, T1_Cs = 0, 0
+        T1_atom1, T1_atom2 = 0, 0
 
     if interaction_on & cfg.broadening:
-        cfg.displacement_list = []  # to store displacements for analysis
+        cfg.positions_list = []  # to store positions for analysis
+        cfg.velocities_list = []  # to store velocities for analysis
 
     # for debugging
     print("Starting detuning scan...")
@@ -551,25 +596,39 @@ def scan_detuning(cfg, c6_rad_um6=None, interaction_on=True):
         acc = 0.0
         for _ in range(cfg.N_mc):
             acc += simulate_shot(
-                dHz, cfg, c6_rad_um6, rng, T1_cache=(T1_Na, T1_Cs),
+                dHz, cfg, c6_rad_um6, rng, T1_cache=(T1_atom1, T1_atom2),
                 interaction_on=interaction_on,
-                displacement_list=cfg.displacement_list
+                positions_list=cfg.positions_list,
+                velocities_list=cfg.velocities_list
             )
         P[i] = acc / cfg.N_mc # average over MC shots
-    
+
     # plot average displacement for debugging
-    if cfg.plot_displacements:
-        # plot histogram of displacement_list
+    if cfg.plot_displacements and interaction_on & cfg.broadening:
+        # # plot histogram of positions
+        # plt.figure(figsize=(8,5))
+        # all_displacements = np.concatenate(cfg.displacement_list)
+        # plt.hist(all_displacements, bins=50, density=True, alpha=0.7, color='blue')
+        # plt.xlabel("Interatomic distance |R| (μm)")
+        # plt.ylabel("Probability density")
+        # plt.title("Histogram of interatomic distances during interaction")
+        # plt.axvline(cfg.R_mean_um, color='red', linestyle='--', label='Mean distance')
+        # plt.legend()
+        # plt.tight_layout()
+        # plt.show()
+        # plot dots for positions and velocities
         plt.figure(figsize=(8,5))
-        all_displacements = np.concatenate(cfg.displacement_list)
-        plt.hist(all_displacements, bins=50, density=True, alpha=0.7, color='blue')
-        plt.xlabel("Interatomic distance |R| (μm)")
-        plt.ylabel("Probability density")
-        plt.title("Histogram of interatomic distances during interaction")
-        plt.axvline(cfg.R_mean_um, color='red', linestyle='--', label='Mean distance')
+        positions_array = np.array(cfg.positions_list)
+        velocities_array = np.array(cfg.velocities_list)
+        plt.scatter(positions_array[:,0], velocities_array[:,0], alpha=0.5)
+        plt.xlabel("Initial relative position dx (μm)")
+        plt.ylabel("Initial relative velocity dv (μm/s)")
+        plt.title("Initial relative positions and velocities")
+        # plt.axvline(0, color='red', linestyle='--', label='Mean position')
         plt.legend()
         plt.tight_layout()
         plt.show()
+        
     return cfg.Delta_scan_Hz, P
 
 
