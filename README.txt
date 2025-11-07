@@ -9,4 +9,6 @@ General rules / guidelines.
 - In the folder have a README.txt with general information about what the code does and any bugs/issues.
 - Try to have good comments in the code so future students can understand what is happening.
 
+Might be useful to add folders for the different subgroups in the future.
+
 Add some more guidlines...
