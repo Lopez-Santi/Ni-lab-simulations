@@ -89,6 +89,7 @@ class ExperimentConfig:
     load_depth_T_atom2: float = 100 # uK
 
     load_factor: float = np.sqrt(0.01)  # % of trap depth after dropping
+    squeeze_factor: Tuple[float, float, float] = (1.0, 1.0, 1.0) # factor to squeeze position/momentum spread (1.0 = no squeezing) (x = x / squeeze_factor, p = p * squeeze_factor)
 
     ### simulation information ###
     # use default_factory for arrays
@@ -288,8 +289,8 @@ def is_atom_recaptured(cfg: ExperimentConfig,
 
     # calculate potential energy using gaussian beam
     # calculate beam waist from radial and axial trap frequencies
-    # w0 = (omegas_Hz_xyz[0] / omegas_Hz_xyz[2]) * wavelength_nm*1e-9 / (np.pi * np.sqrt(2))
-    w0 = 0.6*1e-6 # hardcoded beam waist in m
+    w0 = (omegas_Hz_xyz[0] / omegas_Hz_xyz[2]) * wavelength_nm*1e-9 / (np.pi * np.sqrt(2))
+    # w0 = 0.6*1e-6 # hardcoded beam waist in m
     # print(w0)
     # calculate the beam waist at position z
     w_z = w0 * np.sqrt(1 + (r_vec[2] / (np.pi * w0**2 / (wavelength_nm*1e-9)))**2 )
@@ -402,10 +403,17 @@ def make_V_of_t_generator(c6_rad_um6: float,
     x0_atom1_um, v0_atom1_umps, n1 = sample_QHO_initial_3d(
         m_atom1, np.array(cfg.omega_trap_atom1_Hz) * cfg.load_factor, cfg.T_uK_atom1, rng
     )
+    # squeeze position and momentum if needed
+    x0_atom1_um = x0_atom1_um / np.array(cfg.squeeze_factor)
+    v0_atom1_umps = v0_atom1_umps * np.array(cfg.squeeze_factor)
 
     x0_atom2_um, v0_atom2_umps, n2 = sample_QHO_initial_3d(
         m_atom2, np.array(cfg.omega_trap_atom2_Hz) * cfg.load_factor, cfg.T_uK_atom2, rng
     )
+    # squeeze position and momentum if needed
+    x0_atom2_um = x0_atom2_um / np.array(cfg.squeeze_factor)
+    v0_atom2_umps = v0_atom2_umps * np.array(cfg.squeeze_factor)
+    
     cfg.n_list.append((n1, n2)) # store n values
 
     # for debugging / analysis, store sampled values
@@ -501,8 +509,11 @@ def simulate_shot(Delta_atom1_Hz,
     Delta_atom1_rad = 2 * np.pi * Delta_atom1_Hz
 
     # π-pulse time and time list
-    # t_pi = np.pi / max(OMEGA_atom1_rad, 1e-30) # avoid div by zero [sec]
-    t_pi = cfg.t_pi_atom1_us * 1e-6  # [sec]
+    if cfg.t_pi_atom1_us == None:
+        t_pi = np.pi / max(OMEGA_atom1_rad, 1e-30) # avoid div by zero [sec]
+    else:
+        t_pi = cfg.t_pi_atom1_us * 1e-6  # [sec]
+
     tlist = np.linspace(0.0, t_pi, cfg.N_steps) # 200 time steps
 
     # Prepare interaction function
